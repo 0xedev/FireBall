@@ -7,10 +7,9 @@ import "lib/chainlink-brownie-contracts/contracts/src/v0.8/vrf/dev/VRFV2PlusWrap
 import "lib/chainlink-brownie-contracts/contracts/src/v0.8/vrf/dev/libraries/VRFV2PlusClient.sol";
 import "lib/chainlink-brownie-contracts/contracts/src/v0.8/shared/interfaces/LinkTokenInterface.sol";
 
-
 /**
  * @title FireballDrop
- * @dev A smart contract for hosting drop auctions with Chainlink VRF v2.5 Direct Funding, allowing host-funded or participant-paid rewards
+ * @dev A smart contract for managing drop auctions with Chainlink VRF v2.5 Direct Funding, allowing host-funded or participant-paid rewards
  */
 contract FireballDrop is Ownable, ReentrancyGuard, VRFV2PlusWrapperConsumerBase {
     // Chainlink VRF constants
@@ -19,8 +18,8 @@ contract FireballDrop is Ownable, ReentrancyGuard, VRFV2PlusWrapperConsumerBase 
     uint16 public constant REQUEST_CONFIRMATIONS = 3;
     uint32 public constant MAX_NUM_WORDS = 3; // Max winners supported
 
-    // Platform fee percentage (in basis points, 100 = 1%), set by factory
-    uint16 public immutable platformFeePercent;
+    // Platform fee percentage (in basis points, 100 = 1%)
+    uint16 public platformFeePercent;
     address public immutable feeReceiver;
     
     // Structure to store participant information
@@ -41,6 +40,7 @@ contract FireballDrop is Ownable, ReentrancyGuard, VRFV2PlusWrapperConsumerBase 
         bool isActive;
         bool isCompleted;
         bool isPaidEntry; // True if participants pay, false if host funds
+        bool isManualSelection; // True for manual winner selection, false for automatic
         uint32 numWinners; // 1, 2, or 3 winners
         address[] winners; // Array of winner addresses
         mapping(address => bool) participants;
@@ -52,22 +52,35 @@ contract FireballDrop is Ownable, ReentrancyGuard, VRFV2PlusWrapperConsumerBase 
     mapping(uint256 => Drop) public drops;
     uint256 public dropCounter;
     
-    // Mapping from requestId to dropId
-    mapping(uint256 => uint256) private s_requestIdToDropId;
+    // VRF request tracking
+    mapping(uint256 => uint256) private s_requestIdToDropId; // Request ID to Drop ID
+    mapping(uint256 => bool) private s_requestFulfilled; // Request ID to fulfillment status
+    mapping(uint256 => uint256[]) private s_dropToRequestIds; // Drop ID to list of request IDs
     
     // Events
-    event DropCreated(uint256 indexed dropId, address indexed host, uint256 entryFee, uint256 rewardAmount, uint256 maxParticipants, bool isPaidEntry, uint32 numWinners);
-    event ParticipantJoined(uint256 indexed dropId, address indexed participant, string name);
-    event WinnersSelected(uint256 indexed dropId, address[] winners, uint256 prizePerWinner);
-    event RequestSent(uint256 indexed requestId, uint32 numWords);
-    event RequestFulfilled(uint256 indexed requestId, uint256[] randomWords, uint256 payment);
+    event DropCreated(
+        uint256 indexed dropId,
+        address indexed host,
+        uint256 entryFee,
+        uint256 rewardAmount,
+        uint256 maxParticipants,
+        bool isPaidEntry,
+        bool isManualSelection,
+        uint32 numWinners
+    );
+    event ParticipantJoined(uint256 indexed dropId, address indexed participant, string name, uint256 currentParticipants, uint256 maxParticipants);
+    event RequestSent(uint256 indexed requestId, uint256 indexed dropId, uint32 numWinners, bool isManualSelection);
+    event RequestFulfilled(uint256 indexed requestId, uint256 indexed dropId, uint256[] randomWords, uint256 payment);
+    event WinnersSelected(uint256 indexed dropId, address[] winners, uint256[] prizeAmounts, uint256 platformFee);
+    event DropCancelled(uint256 indexed dropId, address indexed host, bool isPaidEntry, uint256 refundedAmount);
+    event PlatformFeeUpdated(uint16 newFeePercent);
     
     /**
      * @dev Constructor
      * @param _wrapperAddress address of the VRF v2.5 Wrapper
      * @param _linkAddress address of the LINK token
      * @param _callbackGasLimit gas limit for the VRF callback
-     * @param _platformFeePercent platform fee percentage in basis points
+     * @param _platformFeePercent initial platform fee percentage in basis points
      * @param _feeReceiver address to receive platform fees
      */
     constructor(
@@ -76,7 +89,7 @@ contract FireballDrop is Ownable, ReentrancyGuard, VRFV2PlusWrapperConsumerBase 
         uint32 _callbackGasLimit,
         uint16 _platformFeePercent,
         address _feeReceiver
-    ) VRFV2PlusWrapperConsumerBase(_wrapperAddress)  Ownable(msg.sender) {
+    ) VRFV2PlusWrapperConsumerBase(_wrapperAddress) Ownable(msg.sender) {
         require(_feeReceiver != address(0), "Invalid fee receiver");
         require(_wrapperAddress != address(0), "Invalid wrapper address");
         require(_linkAddress != address(0), "Invalid LINK address");
@@ -94,6 +107,7 @@ contract FireballDrop is Ownable, ReentrancyGuard, VRFV2PlusWrapperConsumerBase 
      * @param rewardAmount The total reward for winners (host-funded or collected)
      * @param maxParticipants Maximum number of participants
      * @param isPaidEntry True if participants pay, false if host funds
+     * @param isManualSelection True for manual winner selection, false for automatic
      * @param numWinners Number of winners (1, 2, or 3)
      */
     function createDrop(
@@ -101,6 +115,7 @@ contract FireballDrop is Ownable, ReentrancyGuard, VRFV2PlusWrapperConsumerBase 
         uint256 rewardAmount,
         uint256 maxParticipants,
         bool isPaidEntry,
+        bool isManualSelection,
         uint32 numWinners
     ) external payable {
         require(maxParticipants > numWinners, "Need more participants than winners");
@@ -125,10 +140,20 @@ contract FireballDrop is Ownable, ReentrancyGuard, VRFV2PlusWrapperConsumerBase 
         newDrop.isActive = true;
         newDrop.isCompleted = false;
         newDrop.isPaidEntry = isPaidEntry;
+        newDrop.isManualSelection = isManualSelection;
         newDrop.numWinners = numWinners;
         newDrop.winners = new address[](numWinners);
         
-        emit DropCreated(dropId, msg.sender, entryFee, rewardAmount, maxParticipants, isPaidEntry, numWinners);
+        emit DropCreated(
+            dropId,
+            msg.sender,
+            entryFee,
+            rewardAmount,
+            maxParticipants,
+            isPaidEntry,
+            isManualSelection,
+            numWinners
+        );
         
         dropCounter++;
     }
@@ -162,26 +187,36 @@ contract FireballDrop is Ownable, ReentrancyGuard, VRFV2PlusWrapperConsumerBase 
             drop.rewardAmount += msg.value;
         }
         
-        emit ParticipantJoined(dropId, msg.sender, name);
+        emit ParticipantJoined(dropId, msg.sender, name, drop.currentParticipants, drop.maxParticipants);
         
-        // Auto-select winners when drop is full
-        if (drop.currentParticipants == drop.maxParticipants) {
+        // Auto-select winners when drop is full (only for automatic selection)
+        if (!drop.isManualSelection && drop.currentParticipants == drop.maxParticipants) {
             requestRandomWinners(dropId);
         }
     }
     
     /**
-     * @dev Request random numbers to select winners
+     * @dev Initiate manual winner selection for a drop (host-only)
      * @param dropId The ID of the drop
      */
-    function requestRandomWinners(uint256 dropId) public {
+    function selectWinnersManually(uint256 dropId) external {
         Drop storage drop = drops[dropId];
         
-        require(msg.sender == drop.host || msg.sender == owner() || drop.currentParticipants == drop.maxParticipants, 
-            "Only host, owner, or full drop can request winners");
+        require(msg.sender == drop.host, "Only host can select winners manually");
+        require(drop.isManualSelection, "Drop is not set for manual selection");
         require(drop.isActive, "Drop is not active");
         require(!drop.isCompleted, "Drop is already completed");
-        require(drop.currentParticipants >= drop.numWinners, "Need more participants than winners");
+        require(drop.currentParticipants >= drop.numWinners, "Not enough participants");
+        
+        requestRandomWinners(dropId);
+    }
+    
+    /**
+     * @dev Internal function to request random numbers for winner selection
+     * @param dropId The ID of the drop
+     */
+    function requestRandomWinners(uint256 dropId) internal {
+        Drop storage drop = drops[dropId];
         
         // Deactivate the drop
         drop.isActive = false;
@@ -198,7 +233,9 @@ contract FireballDrop is Ownable, ReentrancyGuard, VRFV2PlusWrapperConsumerBase 
         );
         
         s_requestIdToDropId[requestId] = dropId;
-        emit RequestSent(requestId, drop.numWinners);
+        s_requestFulfilled[requestId] = false;
+        s_dropToRequestIds[dropId].push(requestId);
+        emit RequestSent(requestId, dropId, drop.numWinners, drop.isManualSelection);
     }
     
     /**
@@ -211,6 +248,7 @@ contract FireballDrop is Ownable, ReentrancyGuard, VRFV2PlusWrapperConsumerBase 
         Drop storage drop = drops[dropId];
         
         require(!drop.isCompleted, "Drop already completed");
+        require(!s_requestFulfilled[_requestId], "Request already fulfilled");
         
         // Select winners using random numbers
         for (uint32 i = 0; i < drop.numWinners; i++) {
@@ -218,10 +256,22 @@ contract FireballDrop is Ownable, ReentrancyGuard, VRFV2PlusWrapperConsumerBase 
             drop.winners[i] = drop.participantAddresses[winnerIndex];
         }
         
-        // Calculate platform fee and prize per winner
+        // Calculate platform fee and prize distribution
         uint256 platformFee = (drop.rewardAmount * platformFeePercent) / 10000;
         uint256 totalPrize = drop.rewardAmount - platformFee;
-        uint256 prizePerWinner = totalPrize / drop.numWinners;
+        
+        // Distribute prizes based on number of winners
+        uint256[] memory prizeAmounts = new uint256[](drop.numWinners);
+        if (drop.numWinners == 1) {
+            prizeAmounts[0] = totalPrize; // 100% to 1st
+        } else if (drop.numWinners == 2) {
+            prizeAmounts[0] = (totalPrize * 60) / 100; // 60% to 1st
+            prizeAmounts[1] = (totalPrize * 40) / 100; // 40% to 2nd
+        } else if (drop.numWinners == 3) {
+            prizeAmounts[0] = (totalPrize * 50) / 100; // 50% to 1st
+            prizeAmounts[1] = (totalPrize * 30) / 100; // 30% to 2nd
+            prizeAmounts[2] = (totalPrize * 20) / 100; // 20% to 3rd
+        }
         
         // Transfer platform fee
         if (platformFee > 0) {
@@ -229,17 +279,49 @@ contract FireballDrop is Ownable, ReentrancyGuard, VRFV2PlusWrapperConsumerBase 
             require(feeSuccess, "Platform fee transfer failed");
         }
         
-        // Transfer prize to each winner
+        // Transfer prizes to winners
         for (uint32 i = 0; i < drop.numWinners; i++) {
-            (bool prizeSuccess, ) = drop.winners[i].call{value: prizePerWinner}("");
+            (bool prizeSuccess, ) = drop.winners[i].call{value: prizeAmounts[i]}("");
             require(prizeSuccess, "Prize transfer failed");
         }
         
-        // Mark drop as completed
+        // Mark drop as completed and request as fulfilled
         drop.isCompleted = true;
+        s_requestFulfilled[_requestId] = true;
         
-        emit RequestFulfilled(_requestId, _randomWords, platformFee);
-        emit WinnersSelected(dropId, drop.winners, prizePerWinner);
+        emit RequestFulfilled(_requestId, dropId, _randomWords, platformFee);
+        emit WinnersSelected(dropId, drop.winners, prizeAmounts, platformFee);
+    }
+    
+    /**
+     * @dev Update the platform fee percentage for future drops
+     * @param newFeePercent New platform fee percentage in basis points
+     */
+    function updatePlatformFee(uint16 newFeePercent) external onlyOwner {
+        require(newFeePercent <= 1000, "Fee too high"); // Max 10%
+        platformFeePercent = newFeePercent;
+        emit PlatformFeeUpdated(newFeePercent);
+    }
+    
+    /**
+     * @dev Get VRF request details
+     * @param requestId The VRF request ID
+     * @return dropId The associated drop ID
+     * @return isFulfilled Whether the request is fulfilled
+     */
+    function getVrfRequestDetails(uint256 requestId) external view returns (uint256 dropId, bool isFulfilled) {
+        dropId = s_requestIdToDropId[requestId];
+        isFulfilled = s_requestFulfilled[requestId];
+        return (dropId, isFulfilled);
+    }
+    
+    /**
+     * @dev Get all VRF request IDs for a drop
+     * @param dropId The drop ID
+     * @return requestIds Array of VRF request IDs
+     */
+    function getDropVrfRequests(uint256 dropId) external view returns (uint256[] memory requestIds) {
+        return s_dropToRequestIds[dropId];
     }
     
     /**
@@ -274,6 +356,7 @@ contract FireballDrop is Ownable, ReentrancyGuard, VRFV2PlusWrapperConsumerBase 
      * @return isActive Whether the drop is active
      * @return isCompleted Whether the drop is completed
      * @return isPaidEntry Whether participants pay
+     * @return isManualSelection Whether winner selection is manual
      * @return numWinners Number of winners
      * @return winners Array of winner addresses
      */
@@ -286,6 +369,7 @@ contract FireballDrop is Ownable, ReentrancyGuard, VRFV2PlusWrapperConsumerBase 
         bool isActive,
         bool isCompleted,
         bool isPaidEntry,
+        bool isManualSelection,
         uint32 numWinners,
         address[] memory winners
     ) {
@@ -300,6 +384,7 @@ contract FireballDrop is Ownable, ReentrancyGuard, VRFV2PlusWrapperConsumerBase 
             drop.isActive,
             drop.isCompleted,
             drop.isPaidEntry,
+            drop.isManualSelection,
             drop.numWinners,
             drop.winners
         );
@@ -331,18 +416,23 @@ contract FireballDrop is Ownable, ReentrancyGuard, VRFV2PlusWrapperConsumerBase 
         drop.isCompleted = true;
         
         // Return funds
+        uint256 refundedAmount;
         if (drop.isPaidEntry) {
             // Refund participants
             for (uint256 i = 0; i < drop.currentParticipants; i++) {
                 address participant = drop.participantAddresses[i];
                 (bool success, ) = participant.call{value: drop.entryFee}("");
                 require(success, "Refund failed");
+                refundedAmount += drop.entryFee;
             }
         } else {
             // Refund host
             (bool success, ) = drop.host.call{value: drop.rewardAmount}("");
             require(success, "Host refund failed");
+            refundedAmount = drop.rewardAmount;
         }
+        
+        emit DropCancelled(dropId, drop.host, drop.isPaidEntry, refundedAmount);
     }
     
     /**
