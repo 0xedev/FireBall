@@ -248,16 +248,33 @@ contract FireballDrop is Ownable, ReentrancyGuard, VRFV2PlusWrapperConsumerBase 
         
         require(!drop.isCompleted, "Drop already completed");
         require(!s_requestFulfilled[_requestId], "Request already fulfilled");
+        require(drop.currentParticipants >= drop.numWinners, "Insufficient participants for selection");
+        require(_randomWords.length >= drop.numWinners, "Not enough random words returned"); // Safety check
         
-        // Select winners using random numbers
-        for (uint32 i = 0; i < drop.numWinners; i++) {
-            uint256 winnerIndex = _randomWords[i] % drop.currentParticipants;
-            drop.winners[i] = drop.participantAddresses[winnerIndex];
+        // --- Select unique winners using Fisher-Yates style selection on a memory copy ---
+
+       // memory array pool of participants
+        address[] memory participantPool = new address[](drop.currentParticipants);
+        for (uint256 i = 0; i < drop.currentParticipants; i++) {
+            participantPool[i] = drop.participantAddresses[i];
         }
+
+        uint256 participantsToSelectFrom = drop.currentParticipants;
+        for (uint32 i = 0; i < drop.numWinners; i++) {
+             // Select a random index from the remaining participants (i to participantsToSelectFrom - 1)
+            uint256 remainingCount = participantsToSelectFrom - i;
+            uint256 randomIndex = i + (_randomWords[i] % remainingCount);
+        // Swap the participant at randomIndex with the participant at index i in the memory pool
+        address temp = participantPool[randomIndex];
+        participantPool[randomIndex] = participantPool[i];
+        participantPool[i] = temp;
         
-     
+        // Assign the unique winner found at index i of the pool
+        drop.winners[i] = participantPool[i];
+    }
+    
         uint256 distributableAmount;
-        if (drop.isPaidEntry) {
+    if (drop.isPaidEntry) {
             // For participant-paid, use actual collected funds
             distributableAmount = drop.entryFee * drop.currentParticipants;
         } else {
