@@ -56,7 +56,7 @@ contract FireballDrop is Ownable, ReentrancyGuard, VRFV2PlusWrapperConsumerBase 
     mapping(uint256 => uint256) private s_requestIdToDropId; // Request ID to Drop ID
     mapping(uint256 => bool) private s_requestFulfilled; // Request ID to fulfillment status
     mapping(uint256 => uint256[]) private s_dropToRequestIds; // Drop ID to list of request IDs
-    
+     mapping(uint256 => mapping(address => bool)) public claimedRefunds; // dropId => participant => claimed?
     // Events
     event DropCreated(
         uint256 indexed dropId,
@@ -74,6 +74,7 @@ contract FireballDrop is Ownable, ReentrancyGuard, VRFV2PlusWrapperConsumerBase 
     event WinnersSelected(uint256 indexed dropId, address[] winners, uint256[] prizeAmounts, uint256 platformFee);
     event DropCancelled(uint256 indexed dropId, address indexed host, bool isPaidEntry, uint256 refundedAmount);
     event PlatformFeeUpdated(uint16 newFeePercent);
+    event RefundClaimed(uint256 indexed dropId, address indexed participant, uint256 amount);
     
     /**
      * @dev Constructor
@@ -183,9 +184,7 @@ contract FireballDrop is Ownable, ReentrancyGuard, VRFV2PlusWrapperConsumerBase 
         drop.participantAddresses[drop.currentParticipants] = msg.sender;
         drop.participantNames[msg.sender] = name;
         drop.currentParticipants++;
-        if (drop.isPaidEntry) {
-            drop.rewardAmount += msg.value;
-        }
+      
         
         emit ParticipantJoined(dropId, msg.sender, name, drop.currentParticipants, drop.maxParticipants);
         
@@ -256,10 +255,18 @@ contract FireballDrop is Ownable, ReentrancyGuard, VRFV2PlusWrapperConsumerBase 
             drop.winners[i] = drop.participantAddresses[winnerIndex];
         }
         
-        // Calculate platform fee and prize distribution
-        uint256 platformFee = (drop.rewardAmount * platformFeePercent) / 10000;
-        uint256 totalPrize = drop.rewardAmount - platformFee;
-        
+     
+        uint256 distributableAmount;
+        if (drop.isPaidEntry) {
+            // For participant-paid, use actual collected funds
+            distributableAmount = drop.entryFee * drop.currentParticipants;
+        } else {
+            // For host-funded, use the pre-funded reward amount
+            distributableAmount = drop.rewardAmount;
+        }
+        uint256 platformFee = (distributableAmount * platformFeePercent) / 10000;
+        uint256 totalPrize = distributableAmount - platformFee;
+
         // Distribute prizes based on number of winners
         uint256[] memory prizeAmounts = new uint256[](drop.numWinners);
         if (drop.numWinners == 1) {
@@ -418,14 +425,13 @@ contract FireballDrop is Ownable, ReentrancyGuard, VRFV2PlusWrapperConsumerBase 
         // Return funds
         uint256 refundedAmount;
         if (drop.isPaidEntry) {
-            // Refund participants
-            for (uint256 i = 0; i < drop.currentParticipants; i++) {
-                address participant = drop.participantAddresses[i];
-                (bool success, ) = participant.call{value: drop.entryFee}("");
-                require(success, "Refund failed");
-                refundedAmount += drop.entryFee;
-            }
+                // Participants must now call claimRefund()
+            // We calculate the potential total refund amount for the event log
+            refundedAmount = drop.entryFee * drop.currentParticipants;
+            // No ETH transfer happens here for participant-paid drops
         } else {
+            // Host-funded drops: Refund the host directly
+            require(drop.rewardAmount > 0, "Nothing to refund to host");
             // Refund host
             (bool success, ) = drop.host.call{value: drop.rewardAmount}("");
             require(success, "Host refund failed");
@@ -433,6 +439,28 @@ contract FireballDrop is Ownable, ReentrancyGuard, VRFV2PlusWrapperConsumerBase 
         }
         
         emit DropCancelled(dropId, drop.host, drop.isPaidEntry, refundedAmount);
+    }
+
+     /**
+     * @dev Allows a participant to claim their entry fee back if a participant-paid drop was cancelled.
+     * @param dropId The ID of the cancelled drop.
+     */
+    function claimRefund(uint256 dropId) external nonReentrant {
+        Drop storage drop = drops[dropId];
+
+        require(!drop.isActive, "Drop is still active");
+        require(drop.isCompleted, "Drop must be marked completed (cancelled)");
+        require(drop.isPaidEntry, "Only for participant-paid drops");
+        require(drop.participants[msg.sender], "You did not participate in this drop");
+        require(!claimedRefunds[dropId][msg.sender], "Refund already claimed");
+
+        uint256 refundAmount = drop.entryFee;
+        claimedRefunds[dropId][msg.sender] = true;
+
+        (bool success, ) = msg.sender.call{value: refundAmount}("");
+        require(success, "Refund transfer failed");
+
+        emit RefundClaimed(dropId, msg.sender, refundAmount);
     }
     
     /**

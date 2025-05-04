@@ -22,10 +22,10 @@ contract HelperConfig is Script {
             activeNetworkConfig = getSepoliaConfig();
         }
         // --- Add other networks like Mainnet, Polygon, etc. here ---
-        else if (block.chainid == 84542) { // base sepolia Mainnet
+        else if (block.chainid == 84532) { // base sepolia Mainnet
           activeNetworkConfig = getBaseSepoliaConfig();
          }
-        else if (block.chainid == 8452) { // base Mainnet
+        else if (block.chainid == 8453) { // base Mainnet
          activeNetworkConfig = getBaseConfig();
         }
         else {
@@ -45,11 +45,11 @@ contract HelperConfig is Script {
         address _linkToken = 0x779877A7B0D9E8603169DdbD7836e478b4624789;
 
         return NetworkConfig({
-            vrfWrapperAddress: vm.envAddressOr("SEPOLIA_VRF_WRAPPER_ADDRESS", _vrfWrapper),
-            linkTokenAddress: vm.envAddressOr("SEPOLIA_LINK_TOKEN_ADDRESS", address(_linkToken)),
-            callbackGasLimit: vm.envOr("SEPOLIA_CALLBACK_GAS_LIMIT", uint32(90000)), // Default 500k gas
-            initialPlatformFeePercent: vm.envOr("PLATFORM_FEE_PERCENT", uint16(100)), // Default 1%
-            feeReceiverAddress: vm.envAddressOr("FEE_RECEIVER_ADDRESS", address(0)) // Default to deployer if not set
+            vrfWrapperAddress:  _vrfWrapper,
+            linkTokenAddress: address(_linkToken),
+            callbackGasLimit: uint32(300000), // Default 90k gas
+            initialPlatformFeePercent: uint16(100), // Default 1%
+            feeReceiverAddress: vm.envAddress("FEE_RECEIVER_ADDRESS") // Default to deployer if not set
         });
     }
 
@@ -58,22 +58,22 @@ contract HelperConfig is Script {
         address _vrfWrapper = 0x7a1BaC17Ccc5b313516C5E16fb24f7659aA5ebed;
         address _linkToken = 0xE4aB69C077896252FAFBD49EFD26B5D171A32410;
         return NetworkConfig({
-            vrfWrapperAddress: vm.envAddressOr("BASE_SEPOLIA_VRF_WRAPPER_ADDRESS", _vrfWrapper),
-            linkTokenAddress: vm.envAddressOr("BASE_SEPOLIA_LINK_TOKEN_ADDRESS", _linkToken),
-            callbackGasLimit: vm.envOr("BASE_SEPOLIA_CALLBACK_GAS_LIMIT", uint32(128500)), // Default 90k gas
-            initialPlatformFeePercent: vm.envOr("PLATFORM_FEE_PERCENT", uint16(100)), // Default 1%
-            feeReceiverAddress: vm.envAddressOr("FEE_RECEIVER_ADDRESS", address(0)) // Default to deployer if not set
+            vrfWrapperAddress:  _vrfWrapper,
+            linkTokenAddress: _linkToken,
+            callbackGasLimit:  uint32(300000), // Default 90k gas
+            initialPlatformFeePercent:  uint16(100), // Default 1%
+            feeReceiverAddress: vm.envAddress("FEE_RECEIVER_ADDRESS") // Default to deployer if not set
         });
     }
     function getBaseConfig() internal view returns (NetworkConfig memory) {
         address _vrfWrapper = 0x88Fb150BDc53A65fe94Dea0c9BA0a6dAf8C6e196;
         address _linkToken = 0xb0407dbe851f8318bd31404A49e658143C982F23;
         return NetworkConfig({
-            vrfWrapperAddress: vm.envAddressOr("BASE_VRF_WRAPPER_ADDRESS", _vrfWrapper),
-            linkTokenAddress: vm.envAddressOr("BASE_LINK_TOKEN_ADDRESS", _linkToken),
-            callbackGasLimit: vm.envOr("BASE_CALLBACK_GAS_LIMIT", uint32(128500)), // Default 90k gas
-            initialPlatformFeePercent: vm.envOr("PLATFORM_FEE_PERCENT", uint16(100)), // Default 1%
-            feeReceiverAddress: vm.envAddressOr("FEE_RECEIVER_ADDRESS", address(0)) // Default to deployer if not set
+            vrfWrapperAddress:  _vrfWrapper,
+            linkTokenAddress: _linkToken,
+            callbackGasLimit: uint32(vm.envUint("BASE_CALLBACK_GAS_LIMIT")), // Default 90k gas
+            initialPlatformFeePercent: uint16(vm.envUint("PLATFORM_FEE_PERCENT")), // Default 1%
+            feeReceiverAddress: vm.envAddress("FEE_RECEIVER_ADDRESS") // Default to deployer if not set
         });
     }
 

@@ -16,7 +16,7 @@ contract DeployFireballDrop is Script {
             uint16 initialPlatformFeePercent,
             address feeReceiverAddress,
             uint256 deployerPrivateKey
-        ) = helperConfig.activeNetworkConfig();
+        ) = helperConfig.getActiveNetworkConfig();
 
         // Start broadcasting transactions
         vm.startBroadcast(deployerPrivateKey);
